@@ -1,2 +1,4 @@
-# Binary-Classification-Evaluation-Metric
-Binary Classification Evaluation Metric
+# Collection of Evaluation Metrics
+
+ - Binary Classification Evaluation Metrics
+ 
