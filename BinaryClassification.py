@@ -18,3 +18,13 @@ def metric(output, label):
     NPrecision = TN/Nnum if Nnum > 0 else 0
     F1 = 2*TP/(2*TP+FP+FN)
     return acc, TPR, FPR, F1, PPrecision, NPrecision, PR
+
+
+
+
+
+
+
+
+
+
