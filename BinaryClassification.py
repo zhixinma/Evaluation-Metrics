@@ -14,7 +14,7 @@ def metric(output, label):
     PR = Pnum / truth.numel()                   # Positive Rate
     TPR = TP/(TP+FN) if TP+FN > 0 else 0        # True Positive Rate
     FPR = FP/(TN+FP) if TN+FP > 0 else 0        # False Positive Rate
-    Recall = TP/(TP+FN)                         # Recall
+    Recall = TP/(TP+FN) if TP+FN > 0 else 0     # Recall
     PPrecision = TP/Pnum if Pnum > 0 else 0     # Positive Precision
     NPrecision = TN/Nnum if Nnum > 0 else 0     # Negative Precision
     F1 = 2*TP/(2*TP+FP+FN)                      # F1 score
