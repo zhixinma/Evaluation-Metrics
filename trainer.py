@@ -5,18 +5,17 @@ import matplotlib.pyplot as plt
 
 class TrainingConfig:
     def __init__(self):
+        self.batch_size = 128
+        self.epoch = 300
+        self.session_name = "session"
+        self.epoch_per_validation = 1
         self.input_list_trn = None
         self.truth_list_trn = None
         self.input_list_dev = None
         self.truth_list_dev = None
         self.prediction_func = None
-        self.loss_calc_func = None
-        self.loss_funcs = []
-        self.eval_funcs = []
-        self.batch_size = 128
-        self.epoch = 300
-        self.epoch_per_validation = 1
-        self.session_name = "session"
+        self.__loss_funcs = []
+        self.__eval_funcs = []
 
     def set_input_trn(self, input_list):
         self.input_list_trn = input_list
@@ -42,14 +41,17 @@ class TrainingConfig:
     def set_session_name(self, session_name):
         self.session_name = session_name
 
-    def set_loss_calc_func(self, loss_calc_func):
-        self.loss_calc_func = loss_calc_func
-
     def add_loss_func(self, loss_func):
-        self.loss_funcs.append(loss_func)
+        self.__loss_funcs.append(loss_func)
+
+    def get_loss_funcs(self):
+        return self.__loss_funcs
 
     def add_eval_func(self, eval_func):
-        self.eval_funcs.append(eval_func)
+        self.__eval_funcs.append(eval_func)
+
+    def get_eval_funcs(self):
+        return self.__eval_funcs
 
 
 class TrainingState:
@@ -87,6 +89,8 @@ class TrainingState:
         self.historical_pred_batches.append(pred_batch)
 
     def clear_epoch_session(self):
+        self.it_no = 0
+        self.total_it = 0
         self.loss_list: list = []
         self.pred_batch: list = []
         self.gold_batch: list = []
@@ -105,22 +109,57 @@ class TrainingState:
 
 class Metrics:
     def __init__(self):
-        self.bi_cls_metric_tag = ['acc', 'FPR', 'F1', 'R', 'P', 'NP', 'PR', 'MaxP', 'MinP', 'MeanP']
-        self.mul_cls_metric_tag = ['cls', 'acc', 'la', 'F1', 'R', 'P', 'NP', 'PR']
+        self.bi_cls_metric_tag = ['acc', 'F1', 'R', 'P', 'NP', 'PR', 'MaxP', 'MinP', 'MeanP']
+        self.mul_cls_metric_tag = ['acc', 'F1', 'R', 'P', 'NP', 'PR']
 
-    def bi_cls_metric(self, output, label):
+    def bi_cls_metric(self, pred, truth):
+        assert pred.shape == truth.shape, ("Pred:", pred.shape, "Gold:", truth.shape)
+
+        pred = torch.sigmoid(pred)
+        max_prob = pred.max().item()
+        min_prob = pred.min().item()
+        mean_prob = pred.mean().item()
+
         threshold = 0.5
-        output = torch.sigmoid(output)
-        max_prob = output.max().item()
-        min_prob = output.min().item()
-        mean_prob = output.mean().item()
-
-        assert output.shape == label.shape, ("Pred:", output.shape, "Gold:", label.shape)
-
-        pred = (output >= threshold)
-        truth = (label >= threshold)
+        pred = (pred >= threshold)
+        truth = (truth >= threshold)
         right = pred.eq(truth)
-        acc = right.sum().double().item() / right.numel()  # Accuracy
+        acc, f1, recall, precision, n_precision, pr = self.calc_metric(truth, right)
+        metric = [acc, f1, recall, precision, n_precision, pr, max_prob, min_prob, mean_prob]
+
+        for tag, val in zip(self.bi_cls_metric_tag, metric):
+            print("%s: %.2f" % (tag, val), end=" | ")
+        print()
+
+        return acc
+
+    def mul_cls_metric(self, pred, truth):
+        cls_num = pred.shape[-1]
+
+        pred = torch.softmax(pred, dim=-1)
+        pred = pred.argmax(dim=-1).view(-1, )
+        truth = truth.type(torch.long)
+        truth = truth.view(-1, )
+        assert pred.shape == truth.shape, ("Error: unequal shape between pred and label: ", pred.shape, truth.shape)
+
+        right = pred.eq(truth)
+        acc = right.sum().double().item() / right.numel()
+
+        print("Acc @ (all class): %.2f" % acc)
+        for i in range(cls_num):
+            local_truth = (truth == i)
+            right = pred.eq(local_truth)
+            metric = self.calc_metric(local_truth, right)
+            print("@(class %d)" % i, end=" | ")
+            for tag, val in zip(self.mul_cls_metric_tag, metric):
+                print("%s: %.2f" % (tag, val), end=" | ")
+            print()
+
+        return acc
+
+    @staticmethod
+    def calc_metric(truth, right):
+        acc = right.sum().double().item() / right.numel()
 
         tp = (truth * right).sum().double().item()
         tn = (~truth * right).sum().double().item()
@@ -131,57 +170,13 @@ class Metrics:
         n_num = tn + fn
         pr = p_num / truth.numel()  # Positive Rate
 
-        fpr = fp / (tn + fp) if tn + fp > 0 else 0  # False Positive Rate
         recall = tp / (tp + fn) if tp + fn > 0 else 0
         precision = tp / (tp + fp) if tp + fp > 0 else 0
         n_precision = tn / n_num if n_num > 0 else 0
         f1 = 2 * tp / (2 * tp + fp + fn) if tp + fp + fn > 0 else 0
-        metric = [acc, fpr, f1, recall, precision, n_precision, pr, max_prob, min_prob, mean_prob]
+        metric = [acc, f1, recall, precision, n_precision, pr]
 
-        for tag, val in zip(self.bi_cls_metric_tag, metric):
-            print("%s: %.2f" % (tag, val), end=" | ")
-        print()
-
-        return acc
-
-    def mul_cls_metric(self, output, label):
-        truth = None
-        cls_num = output.shape[-1]
-        pred = torch.softmax(output, dim=-1)
-        pred = pred.argmax(dim=-1, keepdim=True).view(-1, )
-        label = label.type(torch.long).view(-1, )
-
-        assert pred.shape == label.shape, ("Error: unequal shape between pred and label: ", pred.shape, label.shape)
-
-        right = pred.eq(label)
-        acc = right.sum().double().item() / right.numel()
-
-        tps, tns, fps, fns = [], [], [], []
-        for i in range(cls_num):
-            truth = (label == i)
-            tps.append((truth * right).sum().double().item())
-            tns.append((~truth * right).sum().double().item())
-            fps.append((truth * ~right).sum().double().item())
-            fns.append((~truth * ~right).sum().double().item())
-
-        for idx, (tp, tn, fp, fn) in enumerate(zip(tps, tns, fps, fns)):
-
-            p_num = tp + fp  # positive sample rate
-            n_num = tn + fn  #
-            pr = p_num / truth.numel()
-
-            acc_c = (tp + tn) / (tp + tn + fp + fn)
-            recall = tp / (tp + fn) if tp + fn > 0 else 0
-            precision = tp / (tp + fp) if tp + fp > 0 else 0
-            n_precision = tn / n_num if n_num > 0 else 0
-            f1 = 2 * tp / (2 * tp + fp + fn) if (2 * tp + fp + fn) > 0 else 0
-
-            metric = [idx, acc, acc_c, f1, recall, precision, n_precision, pr]
-            for tag, val in zip(self.mul_cls_metric_tag, metric):
-                print("%s: %.2f" % (tag, val), end=" | ")
-            print()
-
-        return acc
+        return metric
 
     @staticmethod
     def evaluate_mse_task(pred, gold):
@@ -218,7 +213,6 @@ class Loss:
         return loss
 
 
-
 class Trainer:
     def __init__(self, model, gpu_num=0, **kwargs):
         super(Trainer, self).__init__(**kwargs)
@@ -236,7 +230,6 @@ class Trainer:
         self.loss_pool = Loss()
 
     def train(self):
-        epoch_per_val = self.training_config.epoch_per_validation
         for epoch_id in range(self.training_config.epoch):
             inputs = self.training_config.input_list_trn
             truths = self.training_config.truth_list_trn
@@ -244,22 +237,22 @@ class Trainer:
             self.model.train()
             
             for batch_inputs, batch_truth in self.batch_generator(inputs, truths, batch_size):
-                pred = self.training_config.prediction_func(*batch_inputs)
+                batch_pred = self.training_config.prediction_func(*batch_inputs)
 
-                self.training_state.set_pred_batch(pred)
+                self.training_state.set_pred_batch(batch_pred)
                 self.training_state.set_gold_batch(batch_truth)
                 self.calculate_loss()
                 self.back_propagation()
 
-            if (epoch_id+1) % epoch_per_val == 0:
+            if (epoch_id+1) % self.training_config.epoch_per_validation == 0:
                 inputs = self.training_config.input_list_dev
                 truths = self.training_config.truth_list_dev
                 self.model.eval()
             
                 for batch_inputs, batch_truth in self.batch_generator(inputs, truths, batch_size):
-                    pred = self.training_config.prediction_func(*batch_inputs)
-                    pred = [e.cpu().detach() for e in pred]
-                    self.training_state.record_pred_batch(pred)
+                    batch_pred = self.training_config.prediction_func(*batch_inputs)
+                    batch_pred = [e.cpu().detach() for e in batch_pred]
+                    self.training_state.record_pred_batch(batch_pred)
                 self.evaluate()
 
             self.training_state.update_epoch()
@@ -279,42 +272,11 @@ class Trainer:
 
             yield batch_inputs, batch_truths
 
-    def evaluate(self):
-        sample_element = self.training_state.historical_pred_batches[0]
-        element_type = type(sample_element)
-        element_num = len(sample_element)
-        assert element_type == list, element_type
-
-        # Concatenate all prediction batches
-        pred_batches = [[] for _ in range(element_num)]
-        for tasks_pred in self.training_state.historical_pred_batches:
-            for i, pred in enumerate(tasks_pred):
-                pred_batches[i].append(pred)
-        pred_batches = [torch.cat(pred, dim=0) for pred in pred_batches]
-
-        # Evaluation
-        tasks_acc = []
-        golds = self.training_config.truth_list_dev
-        eval_funcs = self.training_config.eval_funcs
-        for pred, gold, eval_func in zip(pred_batches, golds, eval_funcs):
-            acc = eval_func(pred, gold)
-            tasks_acc.append(acc)
-        print("Epoch-%d validated" % self.training_state.current_epoch_id)
-
-        for i in range(self.training_state.task_num):
-            model_name = self.model_path + "%s.task%d.best.param" % (self.training_config.session_name, i)
-            if self.training_state.best_accuracy[i] < tasks_acc[i]:
-                self.training_state.best_accuracy[i] = tasks_acc[i]
-                print("The best acc is: %.5f at epoch %d" % (self.training_state.best_accuracy[i],
-                                                             self.training_state.current_epoch_id))
-                # torch.save(self.model, model_name)
-                print("Model %s saved" % model_name)
-
     def calculate_loss(self):
         loss_list = []
         pred_list = self.training_state.pred_batch
         gold_list = self.training_state.gold_batch
-        loss_func_list = self.training_config.loss_funcs
+        loss_func_list = self.training_config.get_loss_funcs()
         for pred, gold, loss_func in zip(pred_list, gold_list, loss_func_list):
             loss = loss_func(pred, gold)
             loss_list.append(loss)
@@ -340,15 +302,46 @@ class Trainer:
             self.training_state.running_loss[i] += \
                 self.training_state.loss_list[i].item() * self.training_config.batch_size
 
-    def format_and_train(self, data_trn, data_dev):
-        input_list_trn = [data_trn[0]]
-        truth_list_trn = [data_trn[1], data_trn[0]]
-        input_list_dev = [data_dev[0]]
-        truth_list_dev = [data_dev[1], data_dev[0]]
+    def evaluate(self):
+        # Concatenate all prediction batches
+        pred_batches = [[] for _ in range(self.training_state.task_num)]
+        for tasks_pred in self.training_state.historical_pred_batches:
+            for i, pred in enumerate(tasks_pred):
+                pred_batches[i].append(pred)
+        pred_batches = [torch.cat(pred, dim=0) for pred in pred_batches]
 
-        training_config = TrainingConfig()
-        self.training_config = training_config
+        # Evaluation
+        tasks_acc = []
+        golds = self.training_config.truth_list_dev
+        eval_funcs = self.training_config.get_eval_funcs()
+        for pred, gold, eval_func in zip(pred_batches, golds, eval_funcs):
+            acc = eval_func(pred, gold)
+            tasks_acc.append(acc)
 
+        # Show result and save model
+        print("Epoch-%d validated;" % self.training_state.current_epoch_id)
+        for i in range(self.training_state.task_num):
+            acc = tasks_acc[i]
+            print("Acc @ task %d: %.5f" % (i, acc))
+            model_name = self.model_path + "%s.task%d.best.param" % (self.training_config.session_name, i)
+            if self.training_state.best_accuracy[i] < tasks_acc[i]:
+                self.training_state.best_accuracy[i] = tasks_acc[i]
+                torch.save(self.model, model_name)
+                print("Best acc got! Model: %s saved" % model_name)
+
+    def prepare_and_train(self, data_trn, data_dev):
+        image_trn, label_trn = data_trn
+        image_dev, label_dev = data_dev
+
+        input_list_trn = [image_trn]
+        truth_list_trn = [label_trn, image_trn]
+        input_list_dev = [image_dev]
+        truth_list_dev = [label_dev, image_dev]
+
+        self.training_config = TrainingConfig()
+        self.training_state = TrainingState(task_num=2)
+
+        # Global configure
         self.training_config.set_batch_size(128)
         self.training_config.set_epoch(20)
         self.training_config.set_input_trn(input_list_trn)
@@ -358,12 +351,12 @@ class Trainer:
         self.training_config.set_prediction_func(self.model.forward)
         self.training_config.set_session_name("mnist")
 
+        # Configure for the first task
         self.training_config.add_loss_func(self.loss_pool.calc_mce_loss)
         self.training_config.add_eval_func(self.metrics.mul_cls_metric)
 
+        # Configure for the second task
         self.training_config.add_loss_func(self.loss_pool.calc_mse_loss)
         self.training_config.add_eval_func(self.metrics.evaluate_mse_task)
-
-        self.training_state = TrainingState(task_num=2)
 
         self.train()
