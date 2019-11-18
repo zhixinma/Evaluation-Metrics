@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
+import random
 
 
 class TrainingConfig:
@@ -13,6 +14,8 @@ class TrainingConfig:
         self.truth_list_trn = None
         self.input_list_dev = None
         self.truth_list_dev = None
+        self.input_list_test = None
+        self.truth_list_test = None
         self.prediction_func = None
         self.__loss_funcs = []
         self.__eval_funcs = []
@@ -28,6 +31,12 @@ class TrainingConfig:
 
     def set_truth_dev(self, truth_list):
         self.truth_list_dev = truth_list
+
+    def set_input_test(self, input_list):
+        self.input_list_test = input_list
+
+    def set_truth_test(self, truth_list):
+        self.truth_list_test = truth_list
 
     def set_prediction_func(self, prediction_func):
         self.prediction_func = prediction_func
@@ -71,6 +80,7 @@ class TrainingState:
         # Global data
         self.current_epoch_id: int = 0
         self.best_accuracy: list = [0 for _ in range(self.task_num)]
+        self.best_model_path: str = ""
         self.best_global_loss: float = 1e5
 
     def set_data_size(self, data_size):
@@ -88,7 +98,7 @@ class TrainingState:
     def record_pred_batch(self, pred_batch):
         self.historical_pred_batches.append(pred_batch)
 
-    def clear_epoch_session(self):
+    def __clear_epoch_session(self):
         self.it_no = 0
         self.total_it = 0
         self.loss_list: list = []
@@ -103,7 +113,7 @@ class TrainingState:
             epoch_loss = self.running_loss[i] / self.current_data_size
             print('Task-{} Epoch-{} Loss: {:.4f}'.format(i, self.current_epoch_id, epoch_loss))
 
-        self.clear_epoch_session()
+        self.__clear_epoch_session()
         self.current_epoch_id += 1
 
 
@@ -147,9 +157,12 @@ class Metrics:
 
         print("Acc @ (all class): %.2f" % acc)
         for i in range(cls_num):
-            local_truth = (truth == i)
-            right = pred.eq(local_truth)
-            metric = self.calc_metric(local_truth, right)
+            mask = (truth == i).nonzero()
+            local_pred = (pred[mask].view(-1, ) == i)
+            local_truth = (truth[mask].view(-1, ) == i)
+            local_right = local_pred.eq(local_truth)
+            metric = self.calc_metric(local_truth, local_right)
+
             print("@(class %d)" % i, end=" | ")
             for tag, val in zip(self.mul_cls_metric_tag, metric):
                 print("%s: %.2f" % (tag, val), end=" | ")
@@ -159,6 +172,8 @@ class Metrics:
 
     @staticmethod
     def calc_metric(truth, right):
+        assert right.shape == truth.shape, ("Right:", right.shape, "Gold:", truth.shape)
+
         acc = right.sum().double().item() / right.numel()
 
         tp = (truth * right).sum().double().item()
@@ -230,10 +245,12 @@ class Trainer:
         self.loss_pool = Loss()
 
     def train(self):
+        batch_size = self.training_config.batch_size
+
         for epoch_id in range(self.training_config.epoch):
+            # Training part
             inputs = self.training_config.input_list_trn
             truths = self.training_config.truth_list_trn
-            batch_size = self.training_config.batch_size
             self.model.train()
             
             for batch_inputs, batch_truth in self.batch_generator(inputs, truths, batch_size):
@@ -244,6 +261,7 @@ class Trainer:
                 self.calculate_loss()
                 self.back_propagation()
 
+            # Validation part
             if (epoch_id+1) % self.training_config.epoch_per_validation == 0:
                 inputs = self.training_config.input_list_dev
                 truths = self.training_config.truth_list_dev
@@ -256,6 +274,19 @@ class Trainer:
                 self.evaluate()
 
             self.training_state.update_epoch()
+
+        # Test part
+        inputs = self.training_config.input_list_test
+        truths = self.training_config.truth_list_test
+        model_path = self.training_state.best_model_path
+        self.model = torch.load(model_path)
+        self.model.eval()
+
+        for batch_inputs, batch_truth in self.batch_generator(inputs, truths, batch_size):
+            batch_pred = self.training_config.prediction_func(*batch_inputs)
+            batch_pred = [e.cpu().detach() for e in batch_pred]
+            self.training_state.record_pred_batch(batch_pred)
+        self.test()
 
     def batch_generator(self, inputs, truths, batch_size):
         total_num = inputs[0].shape[0]
@@ -303,6 +334,30 @@ class Trainer:
                 self.training_state.loss_list[i].item() * self.training_config.batch_size
 
     def evaluate(self):
+        tasks_acc = self.__calc_metrics()
+
+        # Show result and save model
+        print("Epoch-%d validated;" % self.training_state.current_epoch_id)
+        for i in range(self.training_state.task_num):
+            acc = tasks_acc[i]
+            print("Acc @ task %d: %.5f" % (i, acc))
+            model_name = self.model_path + "%s.task%d.best.param" % (self.training_config.session_name, i)
+            if self.training_state.best_accuracy[i] < tasks_acc[i]:
+                self.training_state.best_accuracy[i] = tasks_acc[i]
+                torch.save(self.model, model_name)
+                self.training_state.best_model_path = model_name
+                print("Best acc got! Model: %s saved" % model_name)
+
+    def test(self):
+        tasks_acc = self.__calc_metrics()
+
+        # Show result and save model
+        print("%s Tested;" % self.training_state.best_model_path)
+        for i in range(self.training_state.task_num):
+            acc = tasks_acc[i]
+            print("Acc @ task %d: %.5f" % (i, acc))
+
+    def __calc_metrics(self):
         # Concatenate all prediction batches
         pred_batches = [[] for _ in range(self.training_state.task_num)]
         for tasks_pred in self.training_state.historical_pred_batches:
@@ -318,36 +373,38 @@ class Trainer:
             acc = eval_func(pred, gold)
             tasks_acc.append(acc)
 
-        # Show result and save model
-        print("Epoch-%d validated;" % self.training_state.current_epoch_id)
-        for i in range(self.training_state.task_num):
-            acc = tasks_acc[i]
-            print("Acc @ task %d: %.5f" % (i, acc))
-            model_name = self.model_path + "%s.task%d.best.param" % (self.training_config.session_name, i)
-            if self.training_state.best_accuracy[i] < tasks_acc[i]:
-                self.training_state.best_accuracy[i] = tasks_acc[i]
-                torch.save(self.model, model_name)
-                print("Best acc got! Model: %s saved" % model_name)
+        return tasks_acc
 
-    def prepare_and_train(self, data_trn, data_dev):
+    def prepare_and_train(self, data_trn, data_test):
         image_trn, label_trn = data_trn
-        image_dev, label_dev = data_dev
+        image_test, label_test = data_test
+
+        trn_data_size = image_trn.shape[0]
+        boundary = 50000
+        indices = self.get_indices(trn_data_size)
+
+        image_dev, label_dev = image_trn[indices[boundary:]], label_trn[indices[boundary:]]
+        image_trn, label_trn = image_trn[indices[:boundary]], label_trn[indices[:boundary]]
 
         input_list_trn = [image_trn]
         truth_list_trn = [label_trn, image_trn]
         input_list_dev = [image_dev]
         truth_list_dev = [label_dev, image_dev]
+        input_list_test = [image_test]
+        truth_list_test = [label_test, image_test]
 
         self.training_config = TrainingConfig()
         self.training_state = TrainingState(task_num=2)
 
         # Global configure
         self.training_config.set_batch_size(128)
-        self.training_config.set_epoch(20)
+        self.training_config.set_epoch(50)
         self.training_config.set_input_trn(input_list_trn)
         self.training_config.set_truth_trn(truth_list_trn)
         self.training_config.set_input_dev(input_list_dev)
         self.training_config.set_truth_dev(truth_list_dev)
+        self.training_config.set_input_test(input_list_test)
+        self.training_config.set_truth_test(truth_list_test)
         self.training_config.set_prediction_func(self.model.forward)
         self.training_config.set_session_name("mnist")
 
@@ -360,3 +417,11 @@ class Trainer:
         self.training_config.add_eval_func(self.metrics.evaluate_mse_task)
 
         self.train()
+
+    @staticmethod
+    def get_indices(size):
+        random.seed(1)
+        indices = list(range(size))
+        random.shuffle(indices)
+        indices = torch.Tensor(indices).type(torch.long)
+        return indices
