@@ -98,7 +98,7 @@ class TrainingState:
     def record_pred_batch(self, pred_batch):
         self.historical_pred_batches.append(pred_batch)
 
-    def __clear_epoch_session(self):
+    def clear_epoch_session(self):
         self.it_no = 0
         self.total_it = 0
         self.loss_list: list = []
@@ -113,7 +113,7 @@ class TrainingState:
             epoch_loss = self.running_loss[i] / self.current_data_size
             print('Task-{} Epoch-{} Loss: {:.4f}'.format(i, self.current_epoch_id, epoch_loss))
 
-        self.__clear_epoch_session()
+        self.clear_epoch_session()
         self.current_epoch_id += 1
 
 
@@ -245,48 +245,53 @@ class Trainer:
         self.loss_pool = Loss()
 
     def train(self):
-        batch_size = self.training_config.batch_size
-
         for epoch_id in range(self.training_config.epoch):
-            # Training part
-            inputs = self.training_config.input_list_trn
-            truths = self.training_config.truth_list_trn
-            self.model.train()
-            
-            for batch_inputs, batch_truth in self.batch_generator(inputs, truths, batch_size):
-                batch_pred = self.training_config.prediction_func(*batch_inputs)
-
-                self.training_state.set_pred_batch(batch_pred)
-                self.training_state.set_gold_batch(batch_truth)
-                self.calculate_loss()
-                self.back_propagation()
-
-            # Validation part
+            self.train_epoch()
             if (epoch_id+1) % self.training_config.epoch_per_validation == 0:
-                inputs = self.training_config.input_list_dev
-                truths = self.training_config.truth_list_dev
-                self.model.eval()
-            
-                for batch_inputs, batch_truth in self.batch_generator(inputs, truths, batch_size):
-                    batch_pred = self.training_config.prediction_func(*batch_inputs)
-                    batch_pred = [e.cpu().detach() for e in batch_pred]
-                    self.training_state.record_pred_batch(batch_pred)
-                self.evaluate()
-
+                self.validate()
             self.training_state.update_epoch()
+        self.test()
 
-        # Test part
-        inputs = self.training_config.input_list_test
-        truths = self.training_config.truth_list_test
-        model_path = self.training_state.best_model_path
-        self.model = torch.load(model_path)
+    def train_epoch(self):
+        batch_size = self.training_config.batch_size
+        inputs = self.training_config.input_list_trn
+        truths = self.training_config.truth_list_trn
+        self.model.train()
+
+        for batch_inputs, batch_truth in self.batch_generator(inputs, truths, batch_size):
+            batch_pred = self.training_config.prediction_func(*batch_inputs)
+
+            self.training_state.set_pred_batch(batch_pred)
+            self.training_state.set_gold_batch(batch_truth)
+            self.calculate_loss()
+            self.back_propagation()
+
+    def validate(self):
+        batch_size = self.training_config.batch_size
+        inputs = self.training_config.input_list_dev
+        truths = self.training_config.truth_list_dev
         self.model.eval()
 
         for batch_inputs, batch_truth in self.batch_generator(inputs, truths, batch_size):
             batch_pred = self.training_config.prediction_func(*batch_inputs)
             batch_pred = [e.cpu().detach() for e in batch_pred]
             self.training_state.record_pred_batch(batch_pred)
-        self.test()
+        self.eval_val()
+
+    def test(self):
+        batch_size = self.training_config.batch_size
+        inputs = self.training_config.input_list_test
+        truths = self.training_config.truth_list_test
+        model_path = self.training_state.best_model_path
+        self.model = torch.load(model_path)
+        self.model.eval()
+
+        assert self.training_state.historical_pred_batches == [], "Not empty batch recorder"
+        for batch_inputs, batch_truth in self.batch_generator(inputs, truths, batch_size):
+            batch_pred = self.training_config.prediction_func(*batch_inputs)
+            batch_pred = [e.cpu().detach() for e in batch_pred]
+            self.training_state.record_pred_batch(batch_pred)
+        self.eval_test()
 
     def batch_generator(self, inputs, truths, batch_size):
         total_num = inputs[0].shape[0]
@@ -333,8 +338,9 @@ class Trainer:
             self.training_state.running_loss[i] += \
                 self.training_state.loss_list[i].item() * self.training_config.batch_size
 
-    def evaluate(self):
-        tasks_acc = self.__calc_metrics()
+    def eval_val(self):
+        golds = self.training_config.truth_list_dev
+        tasks_acc = self.__calc_metrics(golds)
 
         # Show result and save model
         print("Epoch-%d validated;" % self.training_state.current_epoch_id)
@@ -348,8 +354,9 @@ class Trainer:
                 self.training_state.best_model_path = model_name
                 print("Best acc got! Model: %s saved" % model_name)
 
-    def test(self):
-        tasks_acc = self.__calc_metrics()
+    def eval_test(self):
+        golds = self.training_config.truth_list_test
+        tasks_acc = self.__calc_metrics(golds)
 
         # Show result and save model
         print("%s Tested;" % self.training_state.best_model_path)
@@ -357,7 +364,7 @@ class Trainer:
             acc = tasks_acc[i]
             print("Acc @ task %d: %.5f" % (i, acc))
 
-    def __calc_metrics(self):
+    def __calc_metrics(self, golds):
         # Concatenate all prediction batches
         pred_batches = [[] for _ in range(self.training_state.task_num)]
         for tasks_pred in self.training_state.historical_pred_batches:
@@ -367,7 +374,6 @@ class Trainer:
 
         # Evaluation
         tasks_acc = []
-        golds = self.training_config.truth_list_dev
         eval_funcs = self.training_config.get_eval_funcs()
         for pred, gold, eval_func in zip(pred_batches, golds, eval_funcs):
             acc = eval_func(pred, gold)
@@ -380,7 +386,7 @@ class Trainer:
         image_test, label_test = data_test
 
         trn_data_size = image_trn.shape[0]
-        boundary = 50000
+        boundary = trn_data_size * 8 // 10
         indices = self.get_indices(trn_data_size)
 
         image_dev, label_dev = image_trn[indices[boundary:]], label_trn[indices[boundary:]]
@@ -398,7 +404,7 @@ class Trainer:
 
         # Global configure
         self.training_config.set_batch_size(128)
-        self.training_config.set_epoch(50)
+        self.training_config.set_epoch(30)
         self.training_config.set_input_trn(input_list_trn)
         self.training_config.set_truth_trn(truth_list_trn)
         self.training_config.set_input_dev(input_list_dev)
