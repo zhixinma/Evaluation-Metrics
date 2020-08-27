@@ -1,4 +1,5 @@
-The class **Traininer** provides a template for neural networking training.
+The class ```Traininer``` provides a template for neural network training.
+Except to function ```config()``` and ```train()```, all the rest functions should be private and invisible to users.
 
 ```python 
 class: Trainer   
@@ -16,11 +17,10 @@ class: Trainer
     def batch_padding()
 ```
 
-The class **Loss** and **Metrics** provide some common methods to calculate the loss and evaluation metrics. 
+The class ```Loss``` and ```Metrics``` provide some common methods to calculate the loss and evaluation metrics. 
 
 ```python
 class Loss
-# A Series of Loss function  
     def calc_bce_loss()
     def calc_mce_loss()
     def calc_mse_loss()
@@ -28,7 +28,6 @@ class Loss
 
 ```python
 class Metrics  
-# A Series of Evaluation Metrics  
     def bi_cls_metric()
         return Accuracy, Positive_Rate, True_Positive_Rate, False_Positive_Rate, Recall, Positive_Precision, Negative_Precision, F1_score 
     def mul_cls_metric()
@@ -37,25 +36,27 @@ class Metrics
 ```
 
 
-Data Transfer Object: TrainingConfig and TrainingState
+The class ```TrainingConfig``` and ```TrainingState``` are **Data Transfer Object** which only transfer the data.
 
 ```python
 class TrainingConfig
-  def set_data()
-  def set_pad()
-  def set_conf()
-  def set_forward_func()
-  def add_task()
+    # Transfer the statistic configuration.
+    def set_data()
+    def set_pad()
+    def set_conf()
+    def set_forward_func()
+    def add_task()
 ```
 
 ```python
 class TrainingState
-  def set_pred_batch()
-  def set_gold_batch()
-  def record_metric_batch()
-  def clear_epoch_session()
-  def get_best_model_path()
-  def clear_infer_session()
-  def update_epoch()
+    # Transfer the dynamic state and data during training process.
+    def set_pred_batch()
+    def set_gold_batch()
+    def record_metric_batch()
+    def clear_epoch_session()
+    def get_best_model_path()
+    def clear_infer_session()
+    def update_epoch()
 ```
  
