@@ -32,7 +32,8 @@ class Metrics
         return Accuracy, Positive_Rate, True_Positive_Rate, False_Positive_Rate, Recall, Positive_Precision, Negative_Precision, F1_score 
     def mul_cls_metric()
         return Accuracy, Positive_Rate, True_Positive_Rate, False_Positive_Rate, Recall, Positive_Precision, Negative_Precision, F1_score
- - func: evaluate_mse_task  
+    def seq_metric()
+    def evaluate_mse_task()
 ```
 
 
